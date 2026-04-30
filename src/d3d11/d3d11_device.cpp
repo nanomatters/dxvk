@@ -3706,6 +3706,7 @@ namespace dxvk {
   HRESULT STDMETHODCALLTYPE DXGIVkSwapChainFactory::CreateSwapChain(
           IDXGIVkSurfaceFactory*    pSurfaceFactory,
     const DXGI_SWAP_CHAIN_DESC1*    pDesc,
+          bool                      IsComposition,
           IDXGIVkSwapChain**        ppSwapChain) {
     InitReturnPtr(ppSwapChain);
 
@@ -3713,7 +3714,7 @@ namespace dxvk {
       auto vki = m_device->GetDXVKDevice()->adapter()->vki();
 
       Com<D3D11SwapChain> presenter = new D3D11SwapChain(
-        m_container, m_device, pSurfaceFactory, pDesc);
+        m_container, m_device, pSurfaceFactory, pDesc, IsComposition);
       
       *ppSwapChain = presenter.ref();
       return S_OK;

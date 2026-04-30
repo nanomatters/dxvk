@@ -59,13 +59,15 @@ namespace dxvk {
           D3D11DXGIDevice*        pContainer,
           D3D11Device*            pDevice,
           IDXGIVkSurfaceFactory*  pSurfaceFactory,
-    const DXGI_SWAP_CHAIN_DESC1*  pDesc)
+    const DXGI_SWAP_CHAIN_DESC1*  pDesc,
+          bool                    IsComposition)
   : m_dxgiDevice(pContainer),
     m_parent(pDevice),
     m_surfaceFactory(pSurfaceFactory),
     m_desc(*pDesc),
     m_device(pDevice->GetDXVKDevice()),
-    m_frameLatencyCap(pDevice->GetOptions()->maxFrameLatency) {
+    m_frameLatencyCap(pDevice->GetOptions()->maxFrameLatency),
+    m_isComposition(IsComposition) {
     CreateFrameLatencyEvent();
     CreatePresenter();
     CreateBackBuffers();
@@ -142,6 +144,9 @@ namespace dxvk {
       Logger::err("D3D11: GetImage: Invalid buffer ID");
       return DXGI_ERROR_UNSUPPORTED;
     }
+
+    if (m_isComposition && BufferId == m_backBuffers.size() - 1u)
+      BufferId = 0u;
 
     return m_backBuffers[BufferId]->QueryInterface(riid, ppBuffer);
   }
@@ -261,6 +266,9 @@ namespace dxvk {
       if (hr != S_OK)
         return hr;
 
+      if (m_isComposition)
+        return S_OK;
+
       VkResult status = m_presenter->checkSwapChainStatus();
       return status == VK_SUCCESS ? S_OK : DXGI_STATUS_OCCLUDED;
     }
@@ -271,7 +279,7 @@ namespace dxvk {
     }
 
     try {
-      hr = PresentImage(SyncInterval);
+      hr = m_isComposition ? PresentComposition() : PresentImage(SyncInterval);
     } catch (const DxvkError& e) {
       Logger::err(e.message());
       hr = E_FAIL;
@@ -472,6 +480,26 @@ namespace dxvk {
   }
 
 
+  HRESULT D3D11SwapChain::PresentComposition() {
+    auto immediateContext = m_parent->GetContext();
+
+    {
+      auto immediateContextLock = immediateContext->LockContext();
+
+      immediateContext->EndFrame(nullptr);
+      immediateContext->ExecuteFlush(GpuFlushType::ExplicitFlush, nullptr, true);
+
+      m_frameId += 1;
+      immediateContext->FlushCsChunk();
+    }
+
+    immediateContext->SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
+    m_frameLatencySignal->signal(m_frameId);
+
+    return S_OK;
+  }
+
+
   void D3D11SwapChain::RotateBackBuffers(D3D11ImmediateContext* ctx) {
     small_vector<Rc<DxvkImage>, 4> images;
 
@@ -519,6 +547,9 @@ namespace dxvk {
     m_presenter->setSurfaceExtent({ m_desc.Width, m_desc.Height });
     m_presenter->setFrameRateLimit(m_targetFrameRate, GetActualFrameLatency());
 
+    if (m_isComposition)
+      return;
+
     m_latency = m_device->createLatencyTracker(m_presenter);
 
     Com<D3D11ReflexDevice> reflex = GetReflexDevice();
@@ -531,8 +562,9 @@ namespace dxvk {
     // creating a new one to free up resources
     m_backBuffers.clear();
 
-    bool sequential = m_desc.SwapEffect == DXGI_SWAP_EFFECT_SEQUENTIAL ||
-                      m_desc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+    bool sequential = m_isComposition ||
+              m_desc.SwapEffect == DXGI_SWAP_EFFECT_SEQUENTIAL ||
+              m_desc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
     uint32_t backBufferCount = sequential ? m_desc.BufferCount : 1u;
 
     // Create new back buffer
@@ -613,6 +645,9 @@ namespace dxvk {
 
 
   void D3D11SwapChain::DestroyLatencyTracker() {
+    if (!m_latency)
+      return;
+
     // Need to make sure the context stops using
     // the tracker for submissions
     m_parent->GetContext()->InjectCs(DxvkCsQueue::Ordered, [

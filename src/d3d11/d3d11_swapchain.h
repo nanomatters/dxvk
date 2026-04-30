@@ -22,7 +22,8 @@ namespace dxvk {
             D3D11DXGIDevice*          pContainer,
             D3D11Device*              pDevice,
             IDXGIVkSurfaceFactory*    pSurfaceFactory,
-      const DXGI_SWAP_CHAIN_DESC1*    pDesc);
+      const DXGI_SWAP_CHAIN_DESC1*    pDesc,
+            bool                      IsComposition);
     
     ~D3D11SwapChain();
 
@@ -115,6 +116,7 @@ namespace dxvk {
     uint64_t                  m_frameId      = DXGI_MAX_SWAP_CHAIN_BUFFERS;
     uint32_t                  m_frameLatency = DefaultFrameLatency;
     uint32_t                  m_frameLatencyCap = 0;
+    bool                      m_isComposition = false;
     HANDLE                    m_frameLatencyEvent = nullptr;
     Rc<sync::CallbackFence>   m_frameLatencySignal;
 
@@ -130,6 +132,8 @@ namespace dxvk {
     Rc<DxvkImageView> GetBackBufferView();
 
     HRESULT PresentImage(UINT SyncInterval);
+
+    HRESULT PresentComposition();
 
     void RotateBackBuffers(D3D11ImmediateContext* ctx);
 

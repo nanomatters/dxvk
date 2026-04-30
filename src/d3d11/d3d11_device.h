@@ -864,6 +864,7 @@ namespace dxvk {
     HRESULT STDMETHODCALLTYPE CreateSwapChain(
             IDXGIVkSurfaceFactory*    pSurfaceFactory,
       const DXGI_SWAP_CHAIN_DESC1*    pDesc,
+            bool                      IsComposition,
             IDXGIVkSwapChain**        ppSwapChain);
 
   private:

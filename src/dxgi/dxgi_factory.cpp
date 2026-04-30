@@ -239,7 +239,7 @@ namespace dxvk {
     IDXGISwapChain1* swapChain = nullptr;
 
     HRESULT hr = CreateSwapChainBase(pDevice,
-      pDesc->OutputWindow, &desc, &descFs, nullptr, &swapChain);
+      pDesc->OutputWindow, &desc, &descFs, nullptr, false, &swapChain);
 
     *ppSwapChain = swapChain;
     return hr;
@@ -259,7 +259,7 @@ namespace dxvk {
       return DXGI_ERROR_INVALID_CALL;
 
     return CreateSwapChainBase(pDevice, hWnd,
-      pDesc, pFullscreenDesc, pRestrictToOutput,
+      pDesc, pFullscreenDesc, pRestrictToOutput, false,
       ppSwapChain);
   }
 
@@ -284,15 +284,10 @@ namespace dxvk {
           IDXGISwapChain1**     ppSwapChain) {
     InitReturnPtr(ppSwapChain);
 
-    if (!m_options.enableDummyCompositionSwapchain) {
-      Logger::err("DxgiFactory::CreateSwapChainForComposition: Not implemented");
-      return E_NOTIMPL;
-    }
-
-    Logger::warn("DxgiFactory::CreateSwapChainForComposition: Creating dummy swap chain");
+    Logger::warn("DxgiFactory::CreateSwapChainForComposition: Creating composition swap chain");
 
     return CreateSwapChainBase(pDevice,
-      nullptr, pDesc, nullptr, pRestrictToOutput, ppSwapChain);
+      nullptr, pDesc, nullptr, pRestrictToOutput, true, ppSwapChain);
   }
   
   
@@ -525,6 +520,7 @@ namespace dxvk {
     const DXGI_SWAP_CHAIN_DESC1* pDesc,
     const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pFullscreenDesc,
           IDXGIOutput*          pRestrictToOutput,
+          bool                  IsComposition,
           IDXGISwapChain1**     ppSwapChain) {
     // Make sure the back buffer size is not zero
     DXGI_SWAP_CHAIN_DESC1 desc = *pDesc;
@@ -558,7 +554,7 @@ namespace dxvk {
         m_instance->vki()->getLoaderProc(), hWnd);
 
       Com<IDXGIVkSwapChain> presenter;
-      HRESULT hr = dxvkFactory->CreateSwapChain(surfaceFactory.ptr(), &desc, &presenter);
+      HRESULT hr = dxvkFactory->CreateSwapChain(surfaceFactory.ptr(), &desc, IsComposition, &presenter);
 
       if (FAILED(hr)) {
         Logger::err(str::format("DXGI: CreateSwapChainForHwnd: Failed to create swap chain, hr ", hr));
