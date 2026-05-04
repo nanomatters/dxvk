@@ -7,6 +7,117 @@
 #include <d3d12.h>
 
 namespace dxvk {
+
+  namespace {
+
+    constexpr UINT WineDxgiPresentDirtyRectsVersion = 1;
+    constexpr UINT WineDxgiPresentDirtyRectsMax = 16;
+
+    const GUID WineDxgiPresentDirtyRectsGuid = {
+      0x5f78c2d4, 0x4e9a, 0x4f4b,
+      { 0x9d, 0x5e, 0x91, 0xd4, 0xa6, 0x0f, 0x37, 0x42 }
+    };
+
+    struct WineDxgiPresentDirtyRects {
+      UINT version;
+      UINT present_count;
+      UINT width;
+      UINT height;
+      UINT dirty_count;
+      RECT dirty_rects[WineDxgiPresentDirtyRectsMax];
+    };
+
+    static_assert(sizeof(WineDxgiPresentDirtyRects) == 276,
+      "Wine DXGI dirty rect metadata layout must match Wine's dxgi_dcomp.h");
+
+    WineDxgiPresentDirtyRects initWineDxgiPresentDirtyInfo(
+            UINT                      width,
+            UINT                      height) {
+      WineDxgiPresentDirtyRects dirtyInfo = { };
+      dirtyInfo.version = WineDxgiPresentDirtyRectsVersion;
+      dirtyInfo.width = width;
+      dirtyInfo.height = height;
+      return dirtyInfo;
+    }
+
+
+    bool isRectEmpty(const RECT& rect) {
+      return rect.left >= rect.right || rect.top >= rect.bottom;
+    }
+
+
+    bool clipRectToSwapChain(
+            RECT*                     rect,
+            UINT                      width,
+            UINT                      height) {
+      rect->left   = std::max<LONG>(rect->left, 0);
+      rect->top    = std::max<LONG>(rect->top, 0);
+      rect->right  = std::min<LONG>(rect->right,  LONG(width));
+      rect->bottom = std::min<LONG>(rect->bottom, LONG(height));
+
+      return !isRectEmpty(*rect);
+    }
+
+
+    void unionRect(
+            RECT*                     dst,
+      const RECT&                     src) {
+      if (isRectEmpty(*dst)) {
+        *dst = src;
+        return;
+      }
+
+      dst->left   = std::min(dst->left,   src.left);
+      dst->top    = std::min(dst->top,    src.top);
+      dst->right  = std::max(dst->right,  src.right);
+      dst->bottom = std::max(dst->bottom, src.bottom);
+    }
+
+
+    bool getWineDxgiPresentDirtyRects(
+      const DXGI_PRESENT_PARAMETERS*  pPresentParameters,
+            UINT                      width,
+            UINT                      height,
+            WineDxgiPresentDirtyRects* dirtyInfo) {
+      RECT bounds = { 0, 0, 0, 0 };
+      bool overflow = false;
+
+      *dirtyInfo = initWineDxgiPresentDirtyInfo(width, height);
+
+      if (!pPresentParameters
+       || !pPresentParameters->DirtyRectsCount
+       || !pPresentParameters->pDirtyRects)
+        return false;
+
+      if (pPresentParameters->pScrollRect || pPresentParameters->pScrollOffset)
+        return false;
+
+      for (UINT i = 0; i < pPresentParameters->DirtyRectsCount; i++) {
+        RECT dirtyRect = pPresentParameters->pDirtyRects[i];
+
+        if (!clipRectToSwapChain(&dirtyRect, width, height))
+          continue;
+
+        unionRect(&bounds, dirtyRect);
+
+        if (!overflow && dirtyInfo->dirty_count < WineDxgiPresentDirtyRectsMax)
+          dirtyInfo->dirty_rects[dirtyInfo->dirty_count++] = dirtyRect;
+        else
+          overflow = true;
+      }
+
+      if (!dirtyInfo->dirty_count)
+        return false;
+
+      if (overflow) {
+        dirtyInfo->dirty_count = 1;
+        dirtyInfo->dirty_rects[0] = bounds;
+      }
+
+      return true;
+    }
+
+  }
   
   DxgiSwapChain::DxgiSwapChain(
           DxgiFactory*                pFactory,
@@ -362,9 +473,16 @@ namespace dxvk {
 
     std::lock_guard<dxvk::recursive_mutex> lockWin(m_lockWindow);
     HRESULT hr = S_OK;
+    WineDxgiPresentDirtyRects presentDirtyInfo = initWineDxgiPresentDirtyInfo(
+      m_desc.Width, m_desc.Height);
 
     if (wsi::isWindow(m_window) || !m_window) {
       std::lock_guard<dxvk::mutex> lockBuf(m_lockBuffer);
+
+      if (!(PresentFlags & DXGI_PRESENT_TEST))
+        getWineDxgiPresentDirtyRects(pPresentParameters,
+          m_desc.Width, m_desc.Height, &presentDirtyInfo);
+
       hr = m_presenter->Present(SyncInterval, PresentFlags, nullptr);
     }
 
@@ -374,6 +492,13 @@ namespace dxvk {
     if (hr == S_OK) {
 
       m_presentId += 1;
+
+      UINT presentCount = 0;
+
+      if (SUCCEEDED(GetLastPresentCount(&presentCount))) {
+        presentDirtyInfo.present_count = presentCount;
+        this->SetPrivateData(WineDxgiPresentDirtyRectsGuid, sizeof(presentDirtyInfo), &presentDirtyInfo);
+      }
 
       // Update monitor frame statistics. This is not consistent with swap chain
       // frame statistics at all, but we want to ensure that all presents become
