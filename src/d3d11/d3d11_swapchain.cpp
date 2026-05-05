@@ -4,6 +4,7 @@
 
 #include "../dxvk/dxvk_latency_builtin.h"
 
+#include "../util/util_env.h"
 #include "../util/util_win32_compat.h"
 
 namespace dxvk {
@@ -54,6 +55,18 @@ namespace dxvk {
     return vkMetadata;
   }
 
+#ifdef DXVK_ENABLE_DCOMP_EXPORT
+
+  constexpr uint32_t DCompDrmFormat(char a, char b, char c, char d) {
+    return uint32_t(a) | (uint32_t(b) << 8) | (uint32_t(c) << 16) | (uint32_t(d) << 24);
+  }
+
+  constexpr uint32_t DCompDrmFormatAbgr8888 = DCompDrmFormat('A', 'B', '2', '4');
+  constexpr uint32_t DCompDrmFormatArgb8888 = DCompDrmFormat('A', 'R', '2', '4');
+  constexpr uint64_t DCompDrmFormatModInvalid = 0x00ffffffffffffffull;
+
+#endif
+
 
   D3D11SwapChain::D3D11SwapChain(
           D3D11DXGIDevice*        pContainer,
@@ -81,11 +94,32 @@ namespace dxvk {
     if (this_thread::isInModuleDetachment())
       return;
 
+#ifdef DXVK_ENABLE_DCOMP_EXPORT
+    {
+      std::lock_guard<dxvk::mutex> lock(m_dcompExportLock);
+      ResetDCompExportRingLocked(false);
+    }
+#endif
+
     m_presenter->destroyResources();
     
     DestroyFrameLatencyEvent();
     DestroyLatencyTracker();
   }
+
+
+#ifdef DXVK_ENABLE_DCOMP_EXPORT
+
+  ULONG STDMETHODCALLTYPE D3D11SwapChain::AddRef() {
+    return ComObject<IDXGIVkSwapChain2>::AddRef();
+  }
+
+
+  ULONG STDMETHODCALLTYPE D3D11SwapChain::Release() {
+    return ComObject<IDXGIVkSwapChain2>::Release();
+  }
+
+#endif
 
 
   HRESULT STDMETHODCALLTYPE D3D11SwapChain::QueryInterface(
@@ -100,9 +134,16 @@ namespace dxvk {
      || riid == __uuidof(IDXGIVkSwapChain)
      || riid == __uuidof(IDXGIVkSwapChain1)
      || riid == __uuidof(IDXGIVkSwapChain2)) {
-      *ppvObject = ref(this);
+      *ppvObject = ref(static_cast<IDXGIVkSwapChain2*>(this));
       return S_OK;
     }
+
+#ifdef DXVK_ENABLE_DCOMP_EXPORT
+    if (riid == __uuidof(IWineDXGICompositionDmabufExport)) {
+      *ppvObject = ref(static_cast<IWineDXGICompositionDmabufExport*>(this));
+      return S_OK;
+    }
+#endif
 
     if (logQueryInterfaceError(__uuidof(IDXGIVkSwapChain), riid)) {
       Logger::warn("D3D11SwapChain::QueryInterface: Unknown interface query");
@@ -187,6 +228,14 @@ namespace dxvk {
       m_presenter->setSurfaceExtent({ m_desc.Width, m_desc.Height });
 
     m_desc = *pDesc;
+
+#ifdef DXVK_ENABLE_DCOMP_EXPORT
+    {
+      std::lock_guard<dxvk::mutex> lock(m_dcompExportLock);
+      ResetDCompExportRingLocked(false);
+    }
+#endif
+
     CreateBackBuffers();
     return S_OK;
   }
@@ -363,6 +412,383 @@ namespace dxvk {
     if (m_presenter != nullptr)
       m_presenter->setFrameRateLimit(m_targetFrameRate, GetActualFrameLatency());
   }
+
+
+#ifdef DXVK_ENABLE_DCOMP_EXPORT
+
+  bool D3D11SwapChain::IsDCompExportDriverSupported() const {
+    VkDriverId driverId = m_device->properties().vk12.driverID;
+
+    if (driverId == VK_DRIVER_ID_MESA_RADV
+     || driverId == VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA)
+      return true;
+
+    return driverId == VK_DRIVER_ID_NVIDIA_PROPRIETARY
+        && env::getEnvVar("DXVK_DCOMP_DMABUF_NVIDIA") == "1";
+  }
+
+
+  bool D3D11SwapChain::HasBusyDCompExportImagesLocked() const {
+    for (const auto& image : m_dcompExportRing.images) {
+      if (image.busy)
+        return true;
+    }
+
+    return false;
+  }
+
+
+  HRESULT D3D11SwapChain::SelectDCompExportFormat(
+    const wine_dxgi_dcomp_dmabuf_host_caps* pCaps,
+          VkFormat                          SourceFormat,
+          uint32_t*                         pFourcc,
+          std::vector<uint64_t>*            pModifiers) const {
+    uint32_t requiredFourcc = 0u;
+
+    switch (SourceFormat) {
+      case VK_FORMAT_R8G8B8A8_UNORM:
+      case VK_FORMAT_R8G8B8A8_SRGB:
+        requiredFourcc = DCompDrmFormatAbgr8888;
+        break;
+
+      case VK_FORMAT_B8G8R8A8_UNORM:
+      case VK_FORMAT_B8G8R8A8_SRGB:
+        requiredFourcc = DCompDrmFormatArgb8888;
+        break;
+
+      default:
+        return DXGI_ERROR_NOT_CURRENTLY_AVAILABLE;
+    }
+
+    pModifiers->clear();
+
+    for (uint32_t i = 0; i < pCaps->format_modifier_count; i++) {
+      const auto& entry = pCaps->format_modifiers[i];
+
+      if (entry.fourcc != requiredFourcc)
+        continue;
+      if (entry.modifier == DCompDrmFormatModInvalid)
+        continue;
+
+      pModifiers->push_back(entry.modifier);
+    }
+
+    if (pModifiers->empty())
+      return DXGI_ERROR_NOT_CURRENTLY_AVAILABLE;
+
+    *pFourcc = requiredFourcc;
+    return S_OK;
+  }
+
+
+  HRESULT D3D11SwapChain::EnsureDCompExportRing(
+    const wine_dxgi_dcomp_dmabuf_host_caps* pCaps,
+    const Rc<DxvkImage>&                    SourceImage,
+          DCompExportRing*                  pRing) {
+    if (pRing->disabled)
+      return DXGI_ERROR_NOT_CURRENTLY_AVAILABLE;
+
+    if (!m_device->features().khrExternalMemoryFd
+     || !m_device->features().extExternalMemoryDmaBuf
+     || !m_device->features().extImageDrmFormatModifier)
+      return DXGI_ERROR_NOT_CURRENTLY_AVAILABLE;
+
+    if (!pCaps || !pCaps->format_modifiers || !pCaps->format_modifier_count)
+      return DXGI_ERROR_NOT_CURRENTLY_AVAILABLE;
+
+    uint32_t fourcc = 0u;
+    std::vector<uint64_t> modifiers;
+    HRESULT hr = SelectDCompExportFormat(pCaps, SourceImage->info().format, &fourcc, &modifiers);
+
+    if (FAILED(hr))
+      return hr;
+
+    const auto& sourceInfo = SourceImage->info();
+    uint32_t width = sourceInfo.extent.width;
+    uint32_t height = sourceInfo.extent.height;
+
+    if (pRing->valid
+     && pRing->feedbackGen == pCaps->feedback_gen
+     && pRing->width == width
+     && pRing->height == height
+     && pRing->fourcc == fourcc)
+      return S_OK;
+
+    if (HasBusyDCompExportImagesLocked()) {
+      pRing->valid = false;
+      pRing->poisoned = true;
+      return DXGI_ERROR_NOT_CURRENTLY_AVAILABLE;
+    }
+
+    DCompExportRing next = { };
+    next.generation = pRing->generation + 1u;
+    next.feedbackGen = pCaps->feedback_gen;
+    next.width = width;
+    next.height = height;
+    next.fourcc = fourcc;
+    next.valid = true;
+
+    for (uint32_t i = 0; i < next.images.size(); i++) {
+      DxvkImageCreateInfo imageInfo;
+      imageInfo.type = VK_IMAGE_TYPE_2D;
+      imageInfo.format = sourceInfo.format;
+      imageInfo.sampleCount = VK_SAMPLE_COUNT_1_BIT;
+      imageInfo.extent = { width, height, 1u };
+      imageInfo.numLayers = 1u;
+      imageInfo.mipLevels = 1u;
+      imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+      imageInfo.stages = VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+      imageInfo.access = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+      imageInfo.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+      imageInfo.layout = VK_IMAGE_LAYOUT_GENERAL;
+      imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+      imageInfo.shared = VK_TRUE;
+      imageInfo.sharing.mode = DxvkSharedHandleMode::Export;
+      imageInfo.sharing.type = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+      imageInfo.drmFormatModifierCount = modifiers.size();
+      imageInfo.drmFormatModifiers = modifiers.data();
+      imageInfo.debugName = "Wine DComp dmabuf export image";
+
+      try {
+        next.images[i].image = m_device->createImage(imageInfo, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+      } catch (const DxvkError&) {
+        return DXGI_ERROR_NOT_CURRENTLY_AVAILABLE;
+      }
+
+      VkImageDrmFormatModifierPropertiesEXT modifierProps = { VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_PROPERTIES_EXT };
+      VkImage image = next.images[i].image->storage()->getImageInfo().image;
+
+      if (m_device->vkd()->vkGetImageDrmFormatModifierPropertiesEXT(m_device->vkd()->device(), image, &modifierProps) != VK_SUCCESS)
+        return DXGI_ERROR_NOT_CURRENTLY_AVAILABLE;
+
+      if (!i)
+        next.modifier = modifierProps.drmFormatModifier;
+      else if (next.modifier != modifierProps.drmFormatModifier)
+        return DXGI_ERROR_NOT_CURRENTLY_AVAILABLE;
+
+      next.images[i].imageId = i + 1u;
+    }
+
+    *pRing = std::move(next);
+    return S_OK;
+  }
+
+
+  void D3D11SwapChain::ResetDCompExportRingLocked(bool KeepDisabled) {
+    bool disabled = KeepDisabled && m_dcompExportRing.disabled;
+    uint32_t generation = m_dcompExportRing.generation;
+
+    if (HasBusyDCompExportImagesLocked()) {
+      m_dcompExportRing.valid = false;
+      m_dcompExportRing.poisoned = true;
+      m_dcompExportRing.disabled = disabled;
+      m_dcompExportCond.notify_all();
+      return;
+    }
+
+    m_dcompExportRing = DCompExportRing();
+    m_dcompExportRing.generation = generation;
+    m_dcompExportRing.disabled = disabled;
+    m_dcompExportCond.notify_all();
+  }
+
+
+  HRESULT STDMETHODCALLTYPE D3D11SwapChain::GetCompositionDmabuf(
+    const wine_dxgi_dcomp_dmabuf_host_caps* pCaps,
+          UINT                              ExpectedPresentCount,
+          wine_dxgi_dmabuf_desc*           pDesc,
+          int*                              pDmabufFd,
+          int*                              pAcquireSyncFd) {
+    if (!pDesc || !pDmabufFd || !pAcquireSyncFd)
+      return E_INVALIDARG;
+
+    *pDmabufFd = -1;
+    *pAcquireSyncFd = -1;
+    *pDesc = wine_dxgi_dmabuf_desc();
+
+    if (!m_isComposition || !IsDCompExportDriverSupported())
+      return DXGI_ERROR_NOT_CURRENTLY_AVAILABLE;
+
+    uint64_t presentCount64 = m_frameId - DXGI_MAX_SWAP_CHAIN_BUFFERS;
+
+    if (ExpectedPresentCount && ExpectedPresentCount != UINT(presentCount64))
+      return DXGI_ERROR_NOT_CURRENTLY_AVAILABLE;
+
+    Rc<DxvkImage> sourceImage = GetCommonTexture(m_backBuffers[0].ptr())->GetImage();
+    Rc<DxvkImage> exportImage = nullptr;
+    uint32_t imageId = 0u;
+    uint32_t ringGeneration = 0u;
+    uint32_t capFeedbackGen = 0u;
+    uint32_t hostOrphanSeq = 0u;
+    uint32_t width = 0u;
+    uint32_t height = 0u;
+    uint32_t fourcc = 0u;
+    uint64_t modifier = 0u;
+    uint64_t releaseToken = 0u;
+    bool poisoned = false;
+
+    {
+      std::unique_lock<dxvk::mutex> lock(m_dcompExportLock);
+      HRESULT hr = EnsureDCompExportRing(pCaps, sourceImage, &m_dcompExportRing);
+
+      if (FAILED(hr))
+        return hr;
+
+      auto findFreeImage = [&] () -> DCompExportImage* {
+        for (uint32_t i = 0; i < m_dcompExportRing.images.size(); i++) {
+          uint32_t index = (m_dcompExportRing.nextImage + i) % m_dcompExportRing.images.size();
+          auto& image = m_dcompExportRing.images[index];
+
+          if (!image.busy) {
+            m_dcompExportRing.nextImage = (index + 1u) % m_dcompExportRing.images.size();
+            return &image;
+          }
+        }
+
+        return nullptr;
+      };
+
+      DCompExportImage* ringImage = findFreeImage();
+
+      if (!ringImage) {
+        m_dcompExportCond.wait_for(lock, std::chrono::milliseconds(1));
+        ringImage = findFreeImage();
+      }
+
+      if (!ringImage) {
+        if (++m_dcompExportRing.consecutiveBacklog >= 8u)
+          m_dcompExportRing.disabled = true;
+        return DXGI_ERROR_NOT_CURRENTLY_AVAILABLE;
+      }
+
+      m_dcompExportRing.consecutiveBacklog = 0u;
+
+      releaseToken = ++m_dcompExportNextReleaseToken;
+      ringImage->busy = true;
+      ringImage->releaseToken = releaseToken;
+
+      exportImage = ringImage->image;
+      imageId = ringImage->imageId;
+      ringGeneration = m_dcompExportRing.generation;
+      capFeedbackGen = m_dcompExportRing.feedbackGen;
+      hostOrphanSeq = m_dcompExportRing.hostOrphanSeq;
+      width = m_dcompExportRing.width;
+      height = m_dcompExportRing.height;
+      fourcc = m_dcompExportRing.fourcc;
+      modifier = m_dcompExportRing.modifier;
+      poisoned = m_dcompExportRing.poisoned;
+    }
+
+    auto immediateContext = m_parent->GetContext();
+
+    {
+      auto immediateContextLock = immediateContext->LockContext();
+
+      VkImageSubresourceLayers subresource = { };
+      subresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+      subresource.mipLevel = 0u;
+      subresource.baseArrayLayer = 0u;
+      subresource.layerCount = 1u;
+
+      VkExtent3D extent = { width, height, 1u };
+
+      immediateContext->EmitCs([
+        cDstImage = exportImage,
+        cSrcImage = sourceImage,
+        cSubresource = subresource,
+        cExtent = extent
+      ] (DxvkContext* ctx) {
+        ctx->initImage(cDstImage, VK_IMAGE_LAYOUT_UNDEFINED);
+        ctx->copyImage(cDstImage, cSubresource, VkOffset3D(), cSrcImage, cSubresource, VkOffset3D(), cExtent);
+      });
+
+      immediateContext->ExecuteFlush(GpuFlushType::ExplicitFlush, nullptr, true);
+    }
+
+    VkSubresourceLayout layout = { };
+    VkImageSubresource subresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0u, 0u };
+    DxvkResourceMemoryInfo memoryInfo = exportImage->storage()->getMemoryInfo();
+    VkImage image = exportImage->storage()->getImageInfo().image;
+
+    m_device->vkd()->vkGetImageSubresourceLayout(m_device->vkd()->device(), image, &subresource, &layout);
+
+    int fd = exportImage->sharedFd(VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT);
+
+    if (fd < 0) {
+      ReleaseCompositionDmabuf(releaseToken, WINE_DXGI_DMABUF_RELEASE_FAILED);
+      return E_FAIL;
+    }
+
+    pDesc->version = 1u;
+    pDesc->desc_flags = poisoned ? WINE_DXGI_DMABUF_DESC_RING_POISONED : 0u;
+    pDesc->present_count = UINT(presentCount64);
+    pDesc->cap_feedback_gen = capFeedbackGen;
+    pDesc->host_orphan_seq = hostOrphanSeq;
+    pDesc->producer_pid = GetCurrentProcessId();
+    pDesc->ring_generation = ringGeneration;
+    pDesc->image_id = imageId;
+    pDesc->width = width;
+    pDesc->height = height;
+    pDesc->fourcc = fourcc;
+    pDesc->stride = UINT(layout.rowPitch);
+    pDesc->offset = UINT(memoryInfo.offset + layout.offset);
+    pDesc->sync_fd_kind = WINE_DXGI_DMABUF_SYNC_NONE;
+    pDesc->modifier = modifier;
+    pDesc->release_token = releaseToken;
+    pDesc->sync_timeline_point = 0u;
+    pDesc->frame_seq = UINT(presentCount64);
+    pDesc->dirty_count = 0u;
+
+    *pDmabufFd = fd;
+    return S_OK;
+  }
+
+
+  HRESULT STDMETHODCALLTYPE D3D11SwapChain::ReleaseCompositionDmabuf(
+          UINT64                            ReleaseToken,
+          UINT                              ReleaseFlags) {
+    if (!ReleaseToken)
+      return E_INVALIDARG;
+
+    std::lock_guard<dxvk::mutex> lock(m_dcompExportLock);
+
+    for (auto& image : m_dcompExportRing.images) {
+      if (image.releaseToken != ReleaseToken)
+        continue;
+
+      image.releaseToken = 0u;
+      image.busy = false;
+
+      if (ReleaseFlags & (WINE_DXGI_DMABUF_RELEASE_FAILED | WINE_DXGI_DMABUF_RELEASE_ORPHANED))
+        ResetDCompExportRingLocked(false);
+      else
+        m_dcompExportCond.notify_all();
+
+      return S_OK;
+    }
+
+    return E_INVALIDARG;
+  }
+
+
+  HRESULT STDMETHODCALLTYPE D3D11SwapChain::PoisonCompositionDmabufRing(
+          UINT                              CapFeedbackGen,
+          UINT                              HostOrphanSeq) {
+    std::lock_guard<dxvk::mutex> lock(m_dcompExportLock);
+
+    if (!m_dcompExportRing.valid)
+      return S_OK;
+    if (m_dcompExportRing.feedbackGen != CapFeedbackGen)
+      return S_OK;
+
+    m_dcompExportRing.hostOrphanSeq = HostOrphanSeq;
+    m_dcompExportRing.poisoned = true;
+    m_dcompExportRing.valid = false;
+    m_dcompExportCond.notify_all();
+    return S_OK;
+  }
+
+#endif
 
 
   Rc<DxvkImageView> D3D11SwapChain::GetBackBufferView() {
@@ -602,7 +1028,7 @@ namespace dxvk {
          dxgiUsage |= DXGI_USAGE_DISCARD_ON_PRESENT;
 
       m_backBuffers.push_back(new D3D11Texture2D(
-        m_parent, this, &desc, dxgiUsage));
+        m_parent, static_cast<IDXGIVkSwapChain2*>(this), &desc, dxgiUsage));
 
       dxgiUsage |= DXGI_USAGE_READ_ONLY;
     }

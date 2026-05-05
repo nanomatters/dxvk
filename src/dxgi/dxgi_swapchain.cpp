@@ -204,6 +204,11 @@ namespace dxvk {
       *ppvObject = ref(&m_destructionNotifier);
       return S_OK;
     }
+
+#ifdef DXVK_ENABLE_DCOMP_EXPORT
+    if (riid == __uuidof(IWineDXGICompositionDmabufExport))
+      return m_presenter->QueryInterface(riid, ppvObject);
+#endif
     
     if (logQueryInterfaceError(__uuidof(IDXGISwapChain), riid)) {
       Logger::warn("DxgiSwapChain::QueryInterface: Unknown interface query");

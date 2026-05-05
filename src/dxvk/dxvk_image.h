@@ -1,5 +1,7 @@
 #pragma once
 
+#include <vector>
+
 #include "dxvk_descriptor_pool.h"
 #include "dxvk_fence.h"
 #include "dxvk_format.h"
@@ -71,6 +73,11 @@ namespace dxvk {
     // be used with this image
     uint32_t viewFormatCount = 0;
     const VkFormat* viewFormats = nullptr;
+
+    // DRM format modifiers that can
+    // be used with this image
+    uint32_t drmFormatModifierCount = 0;
+    const uint64_t* drmFormatModifiers = nullptr;
 
     // Shared handle info
     DxvkSharedHandleInfo sharing = { };
@@ -643,6 +650,13 @@ namespace dxvk {
     HANDLE sharedHandle() const;
 
     /**
+     * \brief Create a new shared fd to dedicated memory backing the image
+     * \returns Caller-owned fd, or -1 on failure
+     */
+    int sharedFd(
+            VkExternalMemoryHandleTypeFlagBits handleType) const;
+
+    /**
      * \brief Retrives sparse page table
      * \returns Page table
      */
@@ -863,6 +877,7 @@ namespace dxvk {
     Rc<DxvkResourceAllocation>  m_storage     = nullptr;
 
     small_vector<VkFormat, 4>   m_viewFormats;
+    std::vector<uint64_t>       m_drmFormatModifiers;
 
     VkImageLayout               m_globalLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     small_vector<VkImageLayout, 16> m_localLayouts;
@@ -883,6 +898,10 @@ namespace dxvk {
     void copyFormatList(
             uint32_t              formatCount,
       const VkFormat*             formats);
+
+    void copyDrmFormatModifierList(
+            uint32_t              modifierCount,
+      const uint64_t*             modifiers);
 
     bool canShareImage(
             DxvkDevice*           device,

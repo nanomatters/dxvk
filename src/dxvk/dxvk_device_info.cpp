@@ -25,10 +25,12 @@ namespace dxvk {
     HANDLE_EXT(extDescriptorBuffer);               \
     HANDLE_EXT(extDescriptorHeap);                 \
     HANDLE_EXT(extExtendedDynamicState3);          \
+    HANDLE_EXT(extExternalMemoryDmaBuf);           \
     HANDLE_EXT(extFragmentShaderInterlock);        \
     HANDLE_EXT(extFullScreenExclusive);            \
     HANDLE_EXT(extGraphicsPipelineLibrary);        \
     HANDLE_EXT(extHdrMetadata);                    \
+    HANDLE_EXT(extImageDrmFormatModifier);         \
     HANDLE_EXT(extLineRasterization);              \
     HANDLE_EXT(extMemoryBudget);                   \
     HANDLE_EXT(extMemoryPriority);                 \
@@ -44,6 +46,7 @@ namespace dxvk {
     HANDLE_EXT(extTransformFeedback);              \
     HANDLE_EXT(extVertexAttributeDivisor);         \
     HANDLE_EXT(khrDynamicRenderingLocalRead);      \
+    HANDLE_EXT(khrExternalMemoryFd);               \
     HANDLE_EXT(khrExternalMemoryWin32);            \
     HANDLE_EXT(khrExternalSemaphoreWin32);         \
     HANDLE_EXT(khrLoadStoreOpNone);                \
@@ -911,6 +914,9 @@ namespace dxvk {
       ENABLE_EXT_FEATURE(extExtendedDynamicState3, extendedDynamicState3LineRasterizationMode, false),
       ENABLE_EXT_FEATURE(extExtendedDynamicState3, extendedDynamicState3SampleLocationsEnable, false),
 
+      /* Dmabuf export for Wine-private composition sharing */
+      ENABLE_EXT(extExternalMemoryDmaBuf, false),
+
       /* Enables client API features */
       ENABLE_EXT_FEATURE(extFragmentShaderInterlock, fragmentShaderSampleInterlock, false),
       ENABLE_EXT_FEATURE(extFragmentShaderInterlock, fragmentShaderPixelInterlock, false),
@@ -923,6 +929,9 @@ namespace dxvk {
 
       /* HDR metadata */
       ENABLE_EXT(extHdrMetadata, false),
+
+      /* DRM format modifiers for dmabuf import/export */
+      ENABLE_EXT(extImageDrmFormatModifier, false),
 
       /* Line rasterization features for client APIs */
       ENABLE_EXT_FEATURE(extLineRasterization, rectangularLines,  false),
@@ -974,6 +983,7 @@ namespace dxvk {
       ENABLE_EXT_FEATURE(khrDynamicRenderingLocalRead, dynamicRenderingLocalRead, false),
 
       /* External memory features for wine */
+      ENABLE_EXT(khrExternalMemoryFd, false),
       ENABLE_EXT(khrExternalMemoryWin32, false),
       ENABLE_EXT(khrExternalSemaphoreWin32, false),
 

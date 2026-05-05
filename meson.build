@@ -173,6 +173,11 @@ else
   ]
 endif
 
+dxgi_dcomp_export = get_option('dxgi_dcomp_export')
+if dxgi_dcomp_export.enabled() or (dxgi_dcomp_export.auto() and platform == 'windows')
+  compiler_args += ['-DDXVK_ENABLE_DCOMP_EXPORT']
+endif
+
 dxbc_spirv = subproject('dxbc-spirv')
 dxbc_spirv_dep = dxbc_spirv.get_variable('dxbc_spv_dep')
 

@@ -144,6 +144,86 @@ IDXGIVkSwapChain2 : public IDXGIVkSwapChain1 {
 };
 
 
+enum wine_dxgi_dmabuf_sync_fd_kind {
+  WINE_DXGI_DMABUF_SYNC_NONE = 0,
+  WINE_DXGI_DMABUF_SYNC_FILE = 1,
+  WINE_DXGI_DMABUF_SYNC_DRM_SYNCOBJ_TIMELINE = 2,
+};
+
+#define WINE_DXGI_DMABUF_DESC_RING_POISONED 0x00000001
+
+#define WINE_DXGI_DMABUF_RELEASE_OK        0x00000001
+#define WINE_DXGI_DMABUF_RELEASE_DROPPED   0x00000002
+#define WINE_DXGI_DMABUF_RELEASE_FAILED    0x00000004
+#define WINE_DXGI_DMABUF_RELEASE_ORPHANED  0x00000008
+
+#define WINE_DXGI_DCOMP_DMABUF_CAPS_HAS_MOD_INVALID 0x00000004
+
+struct wine_dxgi_dcomp_dmabuf_format_modifier {
+  UINT   fourcc;
+  UINT   tranche_index;
+  UINT   tranche_flags;
+  UINT64 modifier;
+};
+
+struct wine_dxgi_dcomp_dmabuf_host_caps {
+  UINT version;
+  UINT feedback_gen;
+  UINT dmabuf_protocol_version;
+  UINT caps_source;
+  UINT caps_flags;
+  UINT has_drm_syncobj;
+  UINT has_zwp_explicit_sync;
+  UINT main_device_major;
+  UINT main_device_minor;
+  UINT format_modifier_count;
+  const wine_dxgi_dcomp_dmabuf_format_modifier* format_modifiers;
+};
+
+struct wine_dxgi_dmabuf_desc {
+  UINT version;
+  UINT desc_flags;
+  UINT present_count;
+  UINT cap_feedback_gen;
+  UINT host_orphan_seq;
+  UINT producer_pid;
+  UINT ring_generation;
+  UINT image_id;
+  UINT width;
+  UINT height;
+  UINT fourcc;
+  UINT stride;
+  UINT offset;
+  UINT sync_fd_kind;
+  UINT64 producer_unique_id;
+  UINT64 modifier;
+  UINT64 release_token;
+  UINT64 sync_timeline_point;
+  UINT frame_seq;
+  UINT dirty_count;
+  UINT16 dirty_rects[7][4];
+};
+
+
+MIDL_INTERFACE("71b1547d-3bfb-4db6-9a7d-bec9016e80f4")
+IWineDXGICompositionDmabufExport : public IUnknown {
+  virtual HRESULT STDMETHODCALLTYPE GetCompositionDmabuf(
+    const wine_dxgi_dcomp_dmabuf_host_caps* pCaps,
+          UINT                              ExpectedPresentCount,
+          wine_dxgi_dmabuf_desc*            pDesc,
+          int*                              pDmabufFd,
+          int*                              pAcquireSyncFd) = 0;
+
+  virtual HRESULT STDMETHODCALLTYPE ReleaseCompositionDmabuf(
+          UINT64                            ReleaseToken,
+          UINT                              ReleaseFlags) = 0;
+
+  virtual HRESULT STDMETHODCALLTYPE PoisonCompositionDmabufRing(
+          UINT                              CapFeedbackGen,
+          UINT                              HostOrphanSeq) = 0;
+};
+
+
 /**
  * \brief Private DXGI presenter factory
  */
@@ -480,5 +560,6 @@ __CRT_UUID_DECL(IDXGIVkSurfaceFactory,     0x1e7895a1,0x1bc3,0x4f9c,0xa6,0x70,0x
 __CRT_UUID_DECL(IDXGIVkSwapChain,          0xe4a9059e,0xb569,0x46ab,0x8d,0xe7,0x50,0x1b,0xd2,0xbc,0x7f,0x7a);
 __CRT_UUID_DECL(IDXGIVkSwapChain1,         0x785326d4,0xb77b,0x4826,0xae,0x70,0x8d,0x08,0x30,0x8e,0xe6,0xd1);
 __CRT_UUID_DECL(IDXGIVkSwapChain2,         0xaed91093,0xe02e,0x458c,0xbd,0xef,0xa9,0x7d,0xa1,0xa7,0xe6,0xd2);
+__CRT_UUID_DECL(IWineDXGICompositionDmabufExport, 0x71b1547d,0x3bfb,0x4db6,0x9a,0x7d,0xbe,0xc9,0x01,0x6e,0x80,0xf4);
 __CRT_UUID_DECL(IDXGIVkSwapChainFactory,   0xe7d6c3ca,0x23a0,0x4e08,0x9f,0x2f,0xea,0x52,0x31,0xdf,0x66,0x33);
 #endif

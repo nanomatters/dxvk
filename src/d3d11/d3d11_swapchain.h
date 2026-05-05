@@ -1,5 +1,8 @@
 #pragma once
 
+#include <array>
+#include <vector>
+
 #include "d3d11_texture.h"
 
 #include "../dxvk/hud/dxvk_hud.h"
@@ -14,7 +17,11 @@ namespace dxvk {
   class D3D11Device;
   class D3D11DXGIDevice;
 
-  class D3D11SwapChain : public ComObject<IDXGIVkSwapChain2> {
+  class D3D11SwapChain : public ComObject<IDXGIVkSwapChain2>
+#ifdef DXVK_ENABLE_DCOMP_EXPORT
+                       , public IWineDXGICompositionDmabufExport
+#endif
+  {
     constexpr static uint32_t DefaultFrameLatency = 1;
   public:
 
@@ -26,6 +33,12 @@ namespace dxvk {
             bool                      IsComposition);
     
     ~D3D11SwapChain();
+
+#ifdef DXVK_ENABLE_DCOMP_EXPORT
+    ULONG STDMETHODCALLTYPE AddRef();
+
+    ULONG STDMETHODCALLTYPE Release();
+#endif
 
     HRESULT STDMETHODCALLTYPE QueryInterface(
             REFIID                    riid,
@@ -91,6 +104,23 @@ namespace dxvk {
     void STDMETHODCALLTYPE SetTargetFrameRate(
             double                    FrameRate);
 
+#ifdef DXVK_ENABLE_DCOMP_EXPORT
+    HRESULT STDMETHODCALLTYPE GetCompositionDmabuf(
+      const wine_dxgi_dcomp_dmabuf_host_caps* pCaps,
+            UINT                              ExpectedPresentCount,
+            wine_dxgi_dmabuf_desc*           pDesc,
+            int*                              pDmabufFd,
+            int*                              pAcquireSyncFd);
+
+    HRESULT STDMETHODCALLTYPE ReleaseCompositionDmabuf(
+            UINT64                            ReleaseToken,
+            UINT                              ReleaseFlags);
+
+    HRESULT STDMETHODCALLTYPE PoisonCompositionDmabufRing(
+            UINT                              CapFeedbackGen,
+            UINT                              HostOrphanSeq);
+#endif
+
   private:
 
     enum BindingIds : uint32_t {
@@ -129,7 +159,57 @@ namespace dxvk {
 
     Rc<hud::HudLatencyItem>   m_latencyHud;
 
+#ifdef DXVK_ENABLE_DCOMP_EXPORT
+    struct DCompExportImage {
+      Rc<DxvkImage> image = nullptr;
+      uint32_t imageId = 0u;
+      uint64_t releaseToken = 0u;
+      bool busy = false;
+    };
+
+    struct DCompExportRing {
+      std::array<DCompExportImage, 3> images = { };
+      uint32_t generation = 0u;
+      uint32_t feedbackGen = 0u;
+      uint32_t hostOrphanSeq = 0u;
+      uint32_t width = 0u;
+      uint32_t height = 0u;
+      uint32_t fourcc = 0u;
+      uint64_t modifier = 0u;
+      uint32_t nextImage = 0u;
+      uint32_t consecutiveBacklog = 0u;
+      bool valid = false;
+      bool disabled = false;
+      bool poisoned = false;
+    };
+
+    dxvk::mutex               m_dcompExportLock;
+    dxvk::condition_variable  m_dcompExportCond;
+    DCompExportRing           m_dcompExportRing;
+    uint64_t                  m_dcompExportNextReleaseToken = 0u;
+#endif
+
     Rc<DxvkImageView> GetBackBufferView();
+
+#ifdef DXVK_ENABLE_DCOMP_EXPORT
+    bool IsDCompExportDriverSupported() const;
+
+    bool HasBusyDCompExportImagesLocked() const;
+
+    HRESULT SelectDCompExportFormat(
+      const wine_dxgi_dcomp_dmabuf_host_caps* pCaps,
+            VkFormat                          SourceFormat,
+            uint32_t*                         pFourcc,
+            std::vector<uint64_t>*            pModifiers) const;
+
+    HRESULT EnsureDCompExportRing(
+      const wine_dxgi_dcomp_dmabuf_host_caps* pCaps,
+      const Rc<DxvkImage>&                    SourceImage,
+            DCompExportRing*                  pRing);
+
+    void ResetDCompExportRingLocked(
+            bool                              KeepDisabled);
+#endif
 
     HRESULT PresentImage(UINT SyncInterval);
 
